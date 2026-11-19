@@ -1,0 +1,37 @@
+:root {
+  --vp-font-family-base: "PingFang TC", "Noto Sans TC", "Noto Sans CJK TC",
+    "Microsoft JhengHei", sans-serif;
+  --vp-font-family-mono: ui-monospace, "Sarasa Mono TC", "Cascadia Code",
+    SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 桌面：左欄固定，目錄長過視窗時出現自己的捲軸。 */
+@media (min-width: 960px) {
+  .Layout .VPSidebar {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+}
+
+/* 桌面：右欄固定在視窗裡（主題已是 position: fixed）。標題多時顯示捲軸，不跟文章一起捲走。 */
+@media (min-width: 1280px) {
+  .Layout .VPDoc .aside-container {
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  .Layout .VPDoc .aside-container::-webkit-scrollbar {
+    display: block;
+    width: 8px;
+  }
+}
+
+.vp-doc details.details {
+  margin: 1.25rem 0;
+  padding: 0.6rem 1rem;
+  border-radius: 8px;
+}
