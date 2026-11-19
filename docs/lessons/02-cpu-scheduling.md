@@ -41,3 +41,11 @@ CFS 不用固定時間片，而是用 **vruntime（虛擬執行時間）**：
 1. 為什麼 Round Robin 的時間片不能設得太短，也不能太長？
 2. CFS 怎麼決定下一個要跑誰？nice 值會怎麼影響結果？
 3. 一個 Go 服務放進限制 2 CPU 的容器後，出現延遲尖峰，可能是什麼原因？你會怎麼緩解？
+
+<details><summary>參考答案</summary>
+
+1. 時間片太短，context switch 的開銷（存取暫存器、cache 變冷）占比變高，CPU 花太多時間在「換人」；太長則退化成先來先服務，互動程式要等很久才輪到，延遲變差。
+2. CFS 挑 vruntime（依權重換算的已用 CPU 時間）最小的任務先跑，也就是紅黑樹最左邊的節點。nice 值越低權重越大，vruntime 增長越慢，因此能分到更多 CPU。
+3. 容器的 cgroup CPU quota 用完就會被 throttle，暫停到下個週期。若 Go 的 `GOMAXPROCS` 看的是主機核數（舊版 Go），會開太多 P 平行燒 CPU，更快把配額用光。緩解：設定 `GOMAXPROCS` 等於容器限額（用 `uber-go/automaxprocs`，或升級到 Go 1.25+ 讓 runtime 自動參考 cgroup），並觀察 `nr_throttled` 指標、適度調高 limit。
+
+</details>
