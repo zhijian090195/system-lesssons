@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 340" role="img" aria-labelledby="stackTitle">
+  <title id="stackTitle">由下往上的五層系統</title>
+  <g fill="none" stroke="#1f6f78" stroke-width="1.5">
+    <path d="M28 292V48" stroke-linecap="round"/>
+    <path d="M28 48l-5 8M28 48l5 8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="22" y="168" fill="#1f6f78" font-family="PingFang TC, Noto Sans TC, Microsoft JhengHei, sans-serif" font-size="12" transform="rotate(-90 22 168)" text-anchor="middle">由下往上</text>
+  <g font-family="PingFang TC, Noto Sans TC, Microsoft JhengHei, sans-serif" font-size="14" text-anchor="middle">
+    <rect x="118" y="36" width="168" height="40" rx="8" fill="#e7f3f4" stroke="#1f6f78"/>
+    <text x="202" y="61" fill="#143e44">平行運算</text>
+    <rect x="102" y="88" width="200" height="40" rx="8" fill="#e7f3f4" stroke="#1f6f78"/>
+    <text x="202" y="113" fill="#143e44">共識</text>
+    <rect x="86" y="140" width="232" height="40" rx="8" fill="#e7f3f4" stroke="#1f6f78"/>
+    <text x="202" y="165" fill="#143e44">資料庫系統</text>
+    <rect x="70" y="192" width="264" height="40" rx="8" fill="#d5ebed" stroke="#1f6f78"/>
+    <text x="202" y="217" fill="#143e44">網路通訊</text>
+    <rect x="54" y="244" width="296" height="44" rx="8" fill="#1f6f78"/>
+    <text x="202" y="271" fill="#f4fbfb" font-weight="600">作業系統</text>
+  </g>
+</svg>

@@ -9,8 +9,8 @@ const fontFamily =
 export default withMermaid(
   defineConfig({
     lang: 'zh-TW',
-    title: '底層電腦系統',
-    description: '六十堂繁體中文課，從作業系統由下而上講到平行運算。',
+    title: '電腦系統底層',
+    description: '從作業系統、網路、資料庫、共識到平行運算，由下往上的 60 堂課。',
     base: '/system-lesssons/',
     cleanUrls: true,
     lastUpdated: false,
