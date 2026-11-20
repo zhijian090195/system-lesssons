@@ -93,3 +93,11 @@ perf stat -e dTLB-loads,dTLB-load-misses ./your_app   # 量 TLB 未命中率
 1. 程序 A 和程序 B 都存取虛擬位址 `0x400000`，為什麼不會互相干擾？這和 CR3 暫存器有什麼關係？
 2. 既然每次記憶體存取都要翻譯位址，為什麼程式沒有變慢好幾倍？什麼樣的程式容易讓這個機制失效？
 3. 你在 `top` 看到一個 Go 服務 VIRT 是 3GB、RES 是 200MB，容器的 memory limit 設 512MB，這個服務會被 OOM kill 嗎？為什麼？
+
+<details><summary>參考答案</summary>
+
+1. 每個程序都有自己的分頁表，同一個虛擬位址 `0x400000` 在 A 和 B 的表裡對到不同的實體頁框。CR3 暫存器存的是目前程序最上層分頁表的實體位址，換程序時核心換掉 CR3，MMU 就改用新程序的表翻譯。
+2. 因為 TLB 快取了翻譯結果，靠局部性命中率通常超過 99%。隨機存取大範圍記憶體的程式（大型 hash table、圖走訪、大型資料庫）會讓 TLB 不斷未命中，可以用 huge pages 緩解。
+3. 目前不會。cgroup 算的是實際用到的實體記憶體（RSS 加 page cache 等），不是 VIRT；VIRT 大只是保留了虛擬位址。但如果 RES 長到超過 512MB，就會被 OOM kill（exit code 137）。
+
+</details>
