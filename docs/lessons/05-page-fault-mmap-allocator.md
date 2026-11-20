@@ -120,3 +120,11 @@ func main() {
 1. Minor fault 和 major fault 差在哪裡？為什麼一個服務在高峰期 major fault 突然變多，延遲會明顯上升？
 2. 用 `mmap` 映射一個 10GB 的檔案，呼叫本身幾乎瞬間完成，為什麼？什麼時候才真的讀磁碟？
 3. 你的 Go 服務在容器裡（limit 1GB），GC 之後 heap 只剩 300MB，但 RSS 還是 700MB 好一陣子才降下來。可能的原因是什麼？你可以調哪個設定讓它在接近上限時更守規矩？
+
+<details><summary>參考答案</summary>
+
+1. Minor fault 只需配一個頁框，或把已在記憶體（page cache）裡的頁接上分頁表，微秒級；major fault 要從磁碟或 swap 讀資料，執行緒阻塞，毫秒級。高峰期 major fault 變多，代表記憶體不足、page cache 被擠掉或在用 swap，大量請求卡在磁碟 I/O，延遲上升。
+2. mmap 只建立 VMA，不配實體頁也不讀檔（lazy）。第一次存取某頁觸發 page fault 時，才從 page cache 或磁碟載入那一頁。
+3. Go 把釋放的頁交給背景 scavenger 逐步還給 OS，配置器與碎片也會保留一些頁，所以 RSS 降得慢。設 `GOMEMLIMIT`（例如 800–900MiB），讓 GC 與 scavenger 在接近上限時更積極。
+
+</details>
