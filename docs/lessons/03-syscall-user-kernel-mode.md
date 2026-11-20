@@ -97,3 +97,11 @@ w.Flush()
 1. 為什麼作業系統要區分使用者態和核心態？如果沒有這個區分，會有什麼風險？
 2. syscall 的「模式切換」和上一堂講的「context switch」有什麼不同？什麼情況下一次 syscall 會引發 context switch？
 3. 容器裡的程式發出 syscall 時，是誰在處理？這和 VM 有什麼差別？Docker 用什麼機制限制容器能用的 syscall？
+
+<details><summary>參考答案</summary>
+
+1. 為了**隔離與保護**。使用者態程式碰不到硬體和別人的記憶體，寫壞了頂多自己 crash。如果沒有這個區分，任何程式都能直接寫磁碟、改分頁表、讀別的程序的記憶體，一個 bug 或惡意程式就能拖垮整台機器、偷走資料。
+2. **模式切換**是同一個執行緒從使用者態進入核心態再回來，執行緒沒換；**context switch** 是 CPU 從一個執行緒換成另一個執行緒。當 syscall 需要等待（等磁碟、等網路資料、等鎖、`sleep`）而阻塞時，核心會把這個執行緒設為等待狀態，換別的執行緒上 CPU，這時才發生 context switch。
+3. 由**主機的核心**直接處理，因為容器和主機共用同一個核心。VM 有自己的 guest 核心，syscall 由 guest 核心處理，VM 和主機之間再靠 hypervisor 隔離，所以隔離較強但較重。Docker 用 **seccomp** 設定檔擋掉危險的 syscall，另外還有 capabilities、AppArmor/SELinux 輔助限制。
+
+</details>
