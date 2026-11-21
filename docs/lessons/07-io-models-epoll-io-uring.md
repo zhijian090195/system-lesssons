@@ -132,3 +132,12 @@ strace -f -e trace=epoll_wait,epoll_ctl -p $(pgrep main)   # 看 epoll 呼叫
 1. 你用 epoll 的 **ET（邊緣觸發）** 模式寫了一個伺服器，每次事件只呼叫一次 `read(fd, buf, 4096)`。客戶端一次送了 10KB，結果連線好像卡住了，後面的資料一直沒處理。為什麼？要怎麼改？
 2. 一個 ASP.NET Core API 平常很正常，流量變成 3 倍後回應時間從 50ms 暴增到好幾秒，CPU 卻只有 20%。程式碼裡有很多 `httpClient.GetAsync(url).Result`。發生了什麼事？
 3. 為什麼 Go 的 goroutine 可以「用阻塞的寫法」處理十萬個連線，而 Java 傳統的「一連線一執行緒」模型做不到？兩者在 OS 層面差在哪裡？
+
+
+<details><summary>參考答案</summary>
+
+1. ET（邊緣觸發）只在「沒資料 → 有資料」時通知一次。只讀 4096 bytes 後，剩下約 6KB 還留在 socket buffer，但不會再有新通知，所以看起來卡住了。改法：把 fd 設成非阻塞，迴圈 `read` 到回傳 `EAGAIN` 為止；或改用 LT（水平觸發）。
+2. 這是 sync over async：`.Result` 讓 ThreadPool 執行緒阻塞等網路 I/O。流量增加後執行緒全被佔住，ThreadPool 每秒只會慢慢補新執行緒，請求開始排隊（thread pool starvation），但 CPU 閒著。解法是整條呼叫鏈都改用 `await`。
+3. goroutine 是使用者態的小 stack（起始約 2–8KB）。`Read` 遇到 `EAGAIN` 時，runtime 只停下 goroutine，fd 交給 epoll netpoller，少數 OS 執行緒就能服務大量 goroutine。Java 傳統模型每個連線一條 OS 執行緒，每條約 1MB stack，還有核心排程和 context switch 成本，十萬條撐不住（Java 21 的 virtual threads 已改採類似做法）。
+
+</details>
