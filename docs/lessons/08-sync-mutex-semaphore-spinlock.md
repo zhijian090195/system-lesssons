@@ -160,3 +160,11 @@ func main() {
 1. 一台**單核心**的機器上，執行緒 A 拿著 spinlock，被排程器換下去；執行緒 B 開始等這把 spinlock。會發生什麼事？為什麼 mutex 不會有這個問題？
 2. 你的 ASP.NET Core 服務要確保同一個訂單不會被同時處理兩次。同事在 controller 裡用了 `private static readonly object _lock` 加 `lock(_lock) { ... }`。本機測試正常，部署到有 3 個 replica 的 Kubernetes 後還是出現重複處理。為什麼？另外，如果處理過程中要 `await` 資料庫呼叫，`lock` 還有什麼問題？
 3. 有人說：「初始值為 1 的 semaphore 就等於 mutex。」這句話哪裡不完全正確？
+
+<details><summary>參考答案</summary>
+
+1. 單核心上，B 在 spinlock 上空轉燒掉整個 time slice，而能放鎖的 A 沒在跑，要等 B 被換下來 A 才能跑完放鎖，中間 CPU 全浪費（若 A 在核心關中斷時拿鎖，甚至可能永遠卡住）。mutex 拿不到鎖就睡、讓出 CPU，A 能馬上跑完放鎖，B 再被叫醒。
+2. `lock` 只在單一行程內有效；3 個 replica 是 3 個行程，各自一把鎖，互相看不到。要用分散式鎖或資料庫保證：Redis `SET key val NX PX`、`SELECT ... FOR UPDATE`、唯一約束、冪等鍵。另外 `lock` 區塊內不能 `await`（Monitor 綁在執行緒上，await 後可能換執行緒），要改用 `SemaphoreSlim(1,1)` 加 `await WaitAsync()`。
+3. semaphore 沒有擁有者，任何執行緒都能 `Release`，可能被誤放，或多 release 一次讓計數變 2，互斥就破了。mutex 有擁有者，才能支援遞迴鎖、priority inheritance 和「非擁有者不能解鎖」的偵錯檢查。
+
+</details>
