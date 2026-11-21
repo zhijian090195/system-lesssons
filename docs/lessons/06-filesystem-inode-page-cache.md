@@ -116,3 +116,11 @@ sudo lsof +L1
 1. 線上主機磁碟快滿，你 `rm` 了一個 20GB 的 `app.log`，`df -h` 卻沒變。為什麼？不重啟服務的話可以怎麼處理？
 2. 一個 Go 服務收到請求後呼叫 `f.Write()` 寫入訂單資料就回 200 給客戶端。主機此時斷電，這筆訂單可能遺失嗎？要怎麼改才能保證不遺失？代價是什麼？
 3. 為什麼在 Docker 容器裡修改一個來自 image 的 2GB 檔案的 1 個 byte，第一次會特別慢？
+
+<details><summary>參考答案</summary>
+
+1. `rm` 只是 `unlink`：把目錄項目刪掉、inode 的 link count 減到 0。但服務還開著這個檔案（有 fd 參照），核心要等最後一個 fd 關閉才會釋放資料區塊，所以 `df` 不變。處理方式：用 `sudo lsof +L1` 找到 PID 和 fd 編號，再用 `: > /proc/PID/fd/N` 把它截斷成 0；或讓服務重新開啟 log（送 SIGHUP、logrotate 用 copytruncate）。
+2. 可能遺失。`write()` 回傳只代表資料進了 page cache（變成 dirty page），還沒落盤，斷電就丟。要在回 200 之前呼叫 `f.Sync()`（fsync），或先寫 WAL 並 fsync。代價是每筆請求多一次磁碟往返（雲端網路磁碟上更慢），延遲上升、吞吐下降；可以用 group commit 把多筆請求合併成一次 fsync 來緩解。
+3. overlayfs 的 copy-up：image 層是唯讀的，第一次修改底層檔案時，要先把**整個 2GB 檔案**複製到容器的可寫層，才能改那 1 個 byte。之後再改就快了。要大量寫入的資料應該放在 volume。
+
+</details>
