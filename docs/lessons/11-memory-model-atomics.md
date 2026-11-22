@@ -167,3 +167,12 @@ fmt.Println(data) // 保證 42
 1. 同事說：「我的程式在 CI（Intel x64）跑了一萬次都沒問題，所以沒有 race。」程式部署到 AWS Graviton 之後偶爾讀到舊資料。請用 x86 TSO 和 ARM 弱記憶體模型的差別解釋，並說要用什麼工具在 CI 就抓出來。
 2. 一個 Go 服務用 `var cfg *Config` 做設定熱更新：背景 goroutine 每分鐘 `cfg = loadConfig()`，請求處理時直接讀 `cfg.Timeout`。這有什麼問題？請給一個不需要鎖的修法。
 3. 你有兩個 atomic 變數：`balance` 和 `txCount`，扣款時先 `balance.Add(-amt)` 再 `txCount.Add(1)`。報表程式讀這兩個值算「平均每筆金額」，偶爾算出怪數字。為什麼兩個操作各自都是原子的，結果還是不一致？要怎麼修？
+
+
+<details><summary>參考答案</summary>
+
+1. x86 是 TSO，只會把「寫 → 之後的讀」重排，很多少了 barrier 的程式剛好能跑；ARM 是弱模型，寫寫、讀讀也可能重排，同一份有 race 的程式就會讀到舊值。「跑一萬次沒事」不能證明沒有 race。在 CI 加 `go test -race`（.NET 可用並行壓力測試，並在 ARM runner 上跑），race detector 檢查的是 happens-before，跟 CPU 架構無關。
+2. 一個 goroutine 寫 `cfg`、別的 goroutine 讀，中間沒有 happens-before，是 data race：讀的人可能一直看到舊指標，也可能看到新指標卻讀到還沒寫完的 Config 欄位（ARM 上更容易）。修法：`var cfg atomic.Pointer[Config]`，背景用 `cfg.Store(loadConfig())` 整份替換，請求用 `cfg.Load().Timeout` 讀；新的 Config 建好後就不要再改它（immutable）。
+3. 每個操作各自原子，但「兩個一起」不是原子的：報表可能剛好在 `balance` 扣完、`txCount` 還沒加之間讀，看到一半的狀態。修法：用一把鎖同時保護兩個欄位；或把兩個值放進同一個不可變的 struct，用 `atomic.Pointer` 整份替換（CAS 迴圈）；或讓報表從交易紀錄重新算。
+
+</details>
