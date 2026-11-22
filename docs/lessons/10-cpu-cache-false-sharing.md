@@ -172,3 +172,12 @@ Linux 上可以用 `perf c2c` 找出哪條 cache line 在核心之間 ping-pong�
 1. 你有一個 `[]*Order`（一百萬筆），要算總金額。同事改成 `[]Order`（值型別），什麼邏輯都沒動，速度就快了好幾倍。請用 cache line 和 prefetcher 解釋為什麼。
 2. 一個 Go 服務用 `var stats [16]int64`，每個 worker goroutine 用 `atomic.AddInt64(&stats[workerID], 1)` 累加自己的計數。改成 16 個 worker 之後，吞吐量反而比 4 個 worker 還低。最可能的原因是什麼？請給兩種修法。
 3. MESI 裡，為什麼兩個核心同時「讀」同一條 line 很便宜，但其中一個開始「寫」就變貴了？這跟上一堂的「讀多寫少用 `RWMutex`／`ReaderWriterLockSlim`，有時反而比較慢」有什麼關係？
+
+
+<details><summary>參考答案</summary>
+
+1. `[]*Order` 裡每筆都是指標，實際物件散在 heap 各處，每走一筆幾乎都是 cache miss，位址跳來跳去 prefetcher 也猜不到。`[]Order` 連續存放，一條 64 bytes 的 line 一次載入好幾筆，prefetcher 看得出你在循序讀，會提前搬下一段進來。
+2. false sharing：16 個 int64 只佔 2 條 cache line，各 worker 寫不同格卻搶同一條 line（MESI ping-pong），worker 越多越糟。修法：每格 pad 到 64／128 bytes；或每個 worker 用區域變數累加，最後再合併。
+3. 多核同時讀時 line 可處於 S 狀態，各留副本、不用通訊；寫入要先 RFO 讓別的核心作廢、自己拿到 M 獨佔，line 就開始 ping-pong。`RWMutex` 的讀者計數本身是被所有讀者 atomic 寫入的共享欄位，讀鎖也會讓那條 line ping-pong，所以臨界區很短時 `RWMutex` 可能比 `Mutex` 還慢。
+
+</details>
