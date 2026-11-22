@@ -187,3 +187,11 @@ first.mu.Unlock()
 1. 線上的 Go 服務突然所有 `/checkout` 請求都逾時，但 CPU 只有 2%，而且 runtime **沒有**印出 `all goroutines are asleep - deadlock!`。為什麼 runtime 沒抓到？你會用什麼工具、看什麼東西來確認是死結？
 2. 一個 Blazor Server 頁面的按鈕事件裡寫了 `var data = LoadAsync().Result;`，按下去整個頁面就凍住了。請用 Coffman 四條件中的「循環等待」解釋這是誰在等誰，並說出兩種修法。
 3. 你寫了一個用 Redis 分散式鎖搶任務的 worker，拿不到鎖時固定 `sleep 100ms` 再試。上線 50 個 worker 後，發現 Redis QPS 很高、任務卻很少被成功處理。這比較像死結、活結還是飢餓？要怎麼改？
+
+<details><summary>參考答案</summary>
+
+1. Go runtime 只在「所有」goroutine 都睡著時才報 deadlock。線上服務還有 HTTP listener 等 goroutine 活著，所以部分死結抓不到。用 `net/http/pprof` 的 `/debug/pprof/goroutine?debug=2` 看 stack，找大量卡在 `sync.(*Mutex).Lock` 或 chan send/recv、已經等了好幾分鐘的 goroutine，再檢查拿鎖的順序。
+2. 有 SynchronizationContext 時，UI／電路執行緒卡在 `.Result` 等 Task，而 Task 在 await 之後的後半段要排回同一個執行緒才能完成，兩邊互等成環。修法：事件處理改成 async 並 `await LoadAsync()`；或在函式庫內部用 `ConfigureAwait(false)`（治標）。
+3. 比較像活結（再加上飢餓）：50 個 worker 用同樣的節奏一起重試、一起撞，很忙地打 Redis 卻沒有進展。改成指數退避加隨機 jitter、鎖設 TTL，或改用佇列（Redis Streams／BLPOP、Kafka consumer group），讓系統分派任務，不要靠搶鎖。
+
+</details>
