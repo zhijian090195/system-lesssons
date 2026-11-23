@@ -132,3 +132,10 @@ curl http://example.com
 1. 你的服務部署在 K8s，叢集網路用 VXLAN overlay。小的 API 請求都正常，但回應超過約 1.4KB 的請求偶爾會卡住直到逾時。從封裝和 MTU 的角度，最可能是什麼問題？
 2. 同事說：「封包從我的筆電到伺服器，經過 15 個路由器，所以來源 MAC 和目的 MAC 一路上都沒變。」哪裡錯了？IP 位址呢？什麼情況下 IP 也會被改？
 3. AWS 上你要依照 URL 路徑把 `/api/*` 和 `/static/*` 導到不同的服務，該用 ALB 還是 NLB？用分層的觀念說明為什麼另一個做不到。
+
+<details><summary>參考答案</summary>
+
+1. VXLAN 會在原本的 frame 外面再包一層（外層 Ethernet + IP + UDP + VXLAN header，約 50 bytes）。如果 Pod 網卡的 MTU 還設成 1500，加上外層 header 後實體 frame 就超過底層網路的 1500，會被丟掉或需要分片；小封包剛好沒超過所以正常。若又有防火牆擋掉 ICMP「需要分片」訊息，Path MTU Discovery 失效，TCP 一直重送大 segment，看起來就是「卡住到逾時」。修法：把 overlay 介面的 MTU 調小（例如 1450），或讓底層網路支援 jumbo frame（如 9001），並確保 ICMP 沒被擋。
+2. MAC 只在同一個 L2 網段內有效，每經過一個路由器，路由器都會拆掉舊的 Ethernet header、換上「自己 → 下一跳」的新 MAC，所以 MAC 每一跳都換。IP 位址是最終來源與目的地，正常情況下全程不變；但經過 NAT（家用路由器、雲端 NAT Gateway）時來源 IP/port 會被改寫，經過 DNAT（Docker `-p`、K8s Service、負載平衡器）時目的 IP/port 會被改寫。
+3. 要用 ALB。URL 路徑是 HTTP 請求裡的內容，屬於 L7；ALB 會終結 TLS、解析 HTTP，才看得到 `/api`、`/static`。NLB 工作在 L4，只看 IP 和 port（以及 TCP/UDP），對它來說 HTTP 只是一串加密的位元組，不知道路徑是什麼，只能依 port 轉發。
+</details>
