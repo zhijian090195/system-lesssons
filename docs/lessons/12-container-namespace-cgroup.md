@@ -199,3 +199,12 @@ sequenceDiagram
 1. 你的 Go API 部署在 K8s，`limits.cpu: "1"`，節點有 32 核，Go 版本 1.22。監控顯示平均 CPU 只有 40%，但 p99 延遲常飆到 100ms 以上。請用 cgroup 的 CPU 配額機制解釋原因，並提出兩種修法。
 2. `docker stop` 你的容器時，每次都要等 10 秒才結束，日誌顯示程式沒有跑 graceful shutdown。Dockerfile 最後一行是 `CMD dotnet MyApi.dll`。問題可能出在哪裡？怎麼改？
 3. 兩個容器都在自己的 3000 port listen，為什麼不會衝突？如果要讓它們用 `localhost:3000` 和 `localhost:4000` 互相呼叫，在 K8s 裡要怎麼安排？
+
+
+<details><summary>參考答案</summary>
+
+1. `limits.cpu: "1"` 會寫成 `cpu.max = 100000 100000`：每 100ms 週期全部執行緒加起來最多跑 100ms。Go 1.22 看的是節點的 32 核，GOMAXPROCS=32，突發請求時很多執行緒同時跑，幾 ms 內就用完配額，剩下的時間整組被 throttle，平均使用率不高但 p99 很差（看 `cpu.stat` 的 `nr_throttled` 可確認）。修法：(a) 用 `automaxprocs` 或設 `GOMAXPROCS=1`，或升級到 Go 1.25+ 讓 runtime 自動讀 cgroup；(b) 拿掉 CPU limit 只留 requests，或把 limit 調高；(c) 減少單一請求的平行度。
+2. `CMD dotnet MyApi.dll` 是 shell 形式，實際執行的是 `/bin/sh -c "dotnet MyApi.dll"`，PID 1 是 sh。`docker stop` 送的 SIGTERM 給了 sh，sh 不轉送給 dotnet，10 秒逾時後被 SIGKILL。改成 exec 形式 `CMD ["dotnet", "MyApi.dll"]`（或 `ENTRYPOINT`），讓 dotnet 直接當 PID 1；需要時再加 `--init`／tini 幫忙轉送訊號和收殭屍。
+3. 每個容器有自己的 network namespace，各自有獨立的網卡、IP 和 port 表，所以兩個 3000 互不相干，從外面要靠不同 IP 或 `-p` 對應不同主機 port。若要用 localhost 互連，就讓兩個容器共用同一個 net namespace：在 K8s 把它們放進**同一個 Pod**（例如主程式加 sidecar），但同一個 Pod 裡 port 不能重複，所以一個要改成 listen 4000。Docker 上對應的做法是 `--network container:<另一個>`。
+
+</details>
