@@ -131,3 +131,11 @@ nstat -az | grep -i -E 'ListenOverflows|ListenDrops'
 1. 你的 ASP.NET 服務每處理一個請求就 `using (var client = new HttpClient()) { ... }` 去呼叫另一個內部 API。壓測時 QPS 一到約 500，就開始出現 `SocketException`，`ss` 看到幾萬個 TIME_WAIT。請解釋原因（為什麼大約是這個量級會出事），以及正確的修法。
 2. 線上一台 Go 服務跑幾天後，`ss -tanp state close-wait` 看到上千條連線，全都屬於你的 process，最後檔案描述子用光。這些連線是誰先關的？你的程式最可能哪裡寫錯？
 3. 你的 Node.js 後端放在 AWS ALB 後面，偶爾（約千分之一）出現 502，日誌顯示後端根本沒收到那些請求。後端的 keep-alive timeout 是 5 秒，ALB idle timeout 是 60 秒。請用 TCP 關閉流程解釋 502 怎麼發生，以及怎麼調。
+
+<details><summary>參考答案</summary>
+
+1. 每次 `new HttpClient()` + `Dispose` 都開一條新 TCP 連線再由客戶端主動關閉，關閉後該四元組要停在 TIME_WAIT 約 60 秒。到同一個目的 IP:port 只有來源 port 能變，ephemeral port 約 2.8 萬個（32768–60999）；500 QPS × 60 秒 ≈ 3 萬條 TIME_WAIT，剛好把 port 用光，新連線就配不到 port。修法：重用連線，用單一 static `HttpClient` 或 `IHttpClientFactory`（它管理連線池與 DNS 更新），讓 keep-alive 連線被重複使用；必要時才考慮客戶端的 `tcp_tw_reuse`，但不是根本解。
+2. CLOSE_WAIT 是「被動關閉方」的狀態：對方（下游伺服器或客戶端）已經送 FIN 關閉了，你的核心也回了 ACK，但你的程式一直沒有呼叫 `Close()`，所以永遠不送自己的 FIN。Go 裡最常見的是 HTTP 回應沒有 `defer resp.Body.Close()`（尤其在錯誤分支提早 return 時），或自己寫的 `net.Conn` 在某條路徑上沒關；讀到 EOF 後也要關。
+3. 後端 keep-alive 只有 5 秒，閒置 5 秒就由後端主動送 FIN 關掉連線；ALB 認為這條連線要到 60 秒才會閒置逾時，還把它當成可用的。如果 ALB 剛好在後端送出 FIN 的同時（FIN 還沒到 ALB 前）把新請求送到這條連線，後端核心會回 RST，ALB 就回 502，而後端應用程式根本沒看到請求。修法：讓後端的 keep-alive timeout 大於 ALB 的 idle timeout（例如 Node 設 `server.keepAliveTimeout = 65000`、`headersTimeout` 再大一點），讓關閉永遠由 ALB 主動發起。
+
+</details>
