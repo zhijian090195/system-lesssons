@@ -155,3 +155,12 @@ ss -uanp | head
 1. 你的 App 使用者多在馬來西亞的行動網路上，API 伺服器在 AWS 新加坡，RTT 約 60ms、掉包率偶爾到 2%。首頁一次要打 20 個小 API。請比較 HTTP/2 和 HTTP/3 在「冷啟動第一個請求的延遲」和「掉包時其他請求的表現」上的差異，並說明你不改後端程式碼、最快拿到 HTTP/3 好處的做法。
 2. 同事想用 0-RTT 加速結帳 API（`POST /checkout`）。你會同意嗎？說明風險，以及什麼請求適合用 0-RTT。
 3. 你在 K8s 上部署了支援 HTTP/3 的 Caddy，瀏覽器 DevTools 卻顯示全部是 `h2`。列出至少三個可能的原因和檢查方法。
+
+
+<details><summary>參考答案</summary>
+
+1. **冷啟動**：HTTP/2 要 TCP 握手 1 RTT + TLS 1.3 1 RTT，第一個請求約 2 RTT 後才送出（≈120ms 再加回應的 60ms）；HTTP/3 握手合併只要 1 RTT（≈60ms），回訪還能 0-RTT。**掉包時**：HTTP/2 的 20 個請求共用一條 TCP，掉一個封包所有請求都卡在重組緩衝區等重傳（傳輸層隊頭阻塞）；HTTP/3 只有掉包那條 stream 要等，其他請求照常完成（不過整條連線的 cwnd 仍會下降）。手機切換 Wi-Fi/4G 時 QUIC 還能靠 Connection ID 不斷線。**不改後端**：在前面放支援 HTTP/3 的 CDN 或邊緣（Cloudflare、CloudFront 開啟 HTTP/3），客戶端到邊緣這段高 RTT、易掉包的行動網路走 HTTP/3，邊緣到源站仍走 HTTP/1.1/2。
+2. **不同意。** 0-RTT 資料沒有完整的重放保護，攻擊者可以把截到的 0-RTT 封包再送一次，伺服器可能執行兩次結帳。0-RTT 只適合**冪等、無副作用**的請求（GET 靜態資源、查詢）。若真要用，伺服器必須拒絕 0-RTT 的非冪等請求（例如回 425 Too Early 讓客戶端在握手完成後重送），或要求帶冪等鍵（idempotency key）。
+3. 可能原因與檢查：(a) **UDP port 沒開**：Service / LoadBalancer / Ingress 只開了 TCP 443，要加 `protocol: UDP` 的 443（用 `kubectl get svc -o yaml` 檢查；本機可用 `ss -uanp` 看 Caddy 有沒有在聽 UDP 443）。(b) **負載平衡器不支援 UDP/QUIC**：例如前面是 AWS ALB 或某些 L7 Ingress controller，它們終結 TLS 後只會講 HTTP/1.1/2；要改用 NLB（UDP）或支援 HTTP/3 的 Ingress。(c) **沒有 `alt-svc` 標頭**或被前面代理拿掉：`curl -sI https://你的網域 | grep -i alt-svc` 檢查。(d) **客戶端網路擋 UDP 443**：公司防火牆常見，換手機熱點測試。(e) **瀏覽器還沒切換**：第一次一定先走 h2，看到 alt-svc 後下次才試 h3，重新整理或開新分頁再看；也可用 `curl --http3` 直接驗證伺服器端。
+
+</details>
