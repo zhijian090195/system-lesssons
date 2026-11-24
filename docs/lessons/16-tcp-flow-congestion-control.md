@@ -143,3 +143,13 @@ sudo tc qdisc del dev lo root    # 記得移除
 1. 你從吉隆坡的機器用單一 TCP 連線從美東的 S3 下載大檔，RTT 約 240ms，頻寬有 500 Mbps，但速度一直卡在約 2 Mbps。用 `ss -tin` 看到 `rcv_space` 一直很小。請計算要跑滿 500 Mbps 需要多大的窗口，並說明可能的原因和兩種解法。
 2. 你的 Go 服務從 Kafka 之外的另一個 TCP 資料源串流讀資料，每讀一筆就同步寫入 PostgreSQL。Wireshark 在資料源那端看到大量 `TCP ZeroWindow`，資料源團隊說「你們網路有問題」。真的是網路問題嗎？是哪個機制在作用？你會怎麼改？
 3. 同事說：「慢啟動是指數成長，所以 TCP 一開始其實很快，連線重用對大回應沒什麼幫助，只是省了三次握手。」請反駁他：一條新連線（初始 cwnd = 10 MSS ≈ 14KB、RTT 100ms、不考慮掉包）傳 1MB 的回應大約要幾個 RTT？重用一條 cwnd 已經很大的連線又要幾個？
+
+
+
+<details><summary>參考答案</summary>
+
+1. BDP = 500 Mbps × 0.24 s = 120 Mb ≈ **15 MB**，窗口要至少這麼大。2 Mbps × 0.24 s ≈ 60 KB，表示實際窗口卡在 64KB 左右：可能是 window scaling 沒生效（中間設備把選項剝掉）、接收端 `net.ipv4.tcp_rmem` 上限太小、或應用自己設了很小的 `SO_RCVBUF`（手動設定會關閉自動調整）。解法：調高 `tcp_rmem`/`tcp_wmem` 上限並確認 window scaling 開啟、不要手動設小的 receive buffer；或用多條連線平行下載（S3 range GET / 多段下載），讓多個窗口加總填滿管線；掉包多的話也可考慮 BBR。
+2. 不是網路問題。ZeroWindow 是**接收端（你的 Go 服務）**在流量控制中通告「緩衝區滿了」，因為你的程式讀得太慢：每筆都同步等資料庫寫入，`conn.Read` 很久才被呼叫一次，核心接收緩衝區塞滿。這是 TCP 的背壓在保護你。改法：把讀取和寫入解耦，用一個 goroutine 持續讀 socket 放進有界 channel，多個 worker 批次寫入 PostgreSQL（批次 INSERT 或 `COPY`），提高寫入吞吐；必要時加大接收緩衝區只是緩衝，不是根本解。
+3. 1MB ≈ 1024KB ≈ 70 個 MSS。新連線慢啟動每 RTT 翻倍：第 1 個 RTT 送 10、第 2 個 20（累計 30）、第 3 個 40（累計 70），約需 **3 個 RTT 的資料傳輸**，再加上握手 1 個 RTT（HTTPS 還要再加 TLS 1～2 個 RTT），總共約 4～6 個 RTT ≈ 400～600ms。重用的連線若 cwnd ≥ 70 MSS，**1 個 RTT** 就能送完（約 100ms）。所以連線重用除了省握手，還省掉慢啟動的爬升；注意 Linux 預設 `tcp_slow_start_after_idle=1`，閒置超過一個 RTO 會把 cwnd 重設，長時間閒置的連線好處會變小。
+
+</details>
