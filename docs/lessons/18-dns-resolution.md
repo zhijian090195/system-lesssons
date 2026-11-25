@@ -151,3 +151,12 @@ Go 裡可以用 `GODEBUG=netdns=go+1` 看程式是用純 Go resolver 還是 cgo�
 1. 你要把 `api.aicde.my` 從舊的 VPS 搬到 AWS 新加坡的新 IP，目前 A 記錄 TTL 是 86400。請寫出零停機的切換步驟，並解釋為什麼「改完記錄後，有些使用者一整天都還連到舊機器」。
 2. 你的 C# 服務用一個長壽的 `HttpClient`（正確做法，避免 socket 耗盡）呼叫一個在藍綠部署間會換 IP 的內部 API。切換後，這個服務還是一直打到舊環境，直到重啟才好。DNS TTL 只有 60 秒，為什麼會這樣？要怎麼修？（提示：想想連線重用。）
 3. 某個在 K8s 上跑的 Go 服務每秒呼叫外部支付 API 數百次，你發現 CoreDNS CPU 很高，服務的 p99 延遲有時多了好幾十毫秒。請說明可能的原因，並給出至少兩種改善方法。
+
+<details><summary>參考答案</summary>
+
+1. 步驟：(1) 先把 TTL 從 86400 降到 60（或 300）；(2) **等至少 86400 秒（舊 TTL）**，讓全世界的快取都拿到新的低 TTL；(3) 新機器先準備好並測試（可用 `curl --resolve api.aicde.my:443:新IP` 直接打新機器）；(4) 改 A 記錄到新 IP，舊機器保持運作一段時間（或反向代理到新機器）；(5) 確認流量轉移完成後把 TTL 調回並關掉舊機。一整天還連到舊機的原因：遞迴解析器（ISP、1.1.1.1）在 TTL 86400 期間合法地快取舊答案，你改權威記錄並不會通知它們；此外瀏覽器、作業系統、甚至有些 ISP 會自行延長 TTL，長連線也會一直用舊 IP。
+2. DNS 只在**建立新連線**時查詢。`HttpClient` 的連線池會一直重用已建立的 TCP 連線（keep-alive），只要連線沒斷，就一直打到舊 IP，TTL 再短也沒用。修法：用 `SocketsHttpHandler` 設定 `PooledConnectionLifetime`（例如 1～2 分鐘），讓連線定期汰換、重新解析 DNS；或用 `IHttpClientFactory`（handler 會輪替）。藍綠切換時舊環境也應該優雅關閉連線（回 `Connection: close` / HTTP/2 GOAWAY），讓客戶端重連。
+3. 原因：Pod 的 `ndots:5` + search 網域讓 `api.payment.com` 這種外部名字先試 3 個叢集內後綴，每個都 NXDOMAIN，A/AAAA 各一次，一次呼叫放大成多達 8 次查詢；Go 若每次新建連線（沒重用）就每次都查；容器裡沒有本機 DNS 快取；UDP 查詢偶爾掉包（例如 conntrack 競態）會等 5 秒逾時重試，造成延遲尖峰。改善：(a) 用 FQDN `api.payment.com.` 或在 Pod `dnsConfig` 設 `ndots: 1`～`2`；(b) 部署 NodeLocal DNSCache，每個節點有本地快取；(c) 程式端重用連線（共用 `http.Client`、調大 `MaxIdleConnsPerHost`），減少新連線與 DNS 查詢；(d) 擴充 CoreDNS 副本數、開啟 cache plugin 並調整 TTL。
+
+</details>
+
