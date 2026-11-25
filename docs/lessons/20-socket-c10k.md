@@ -170,3 +170,12 @@ strace -f -e trace=epoll_wait,epoll_ctl,accept4 ./myserver
 1. 你用 Go 寫的 WebSocket 推播服務跑在 Docker 裡，連線數一到約 1000 就開始出現 `accept: too many open files`，CPU 和記憶體都很低。最可能的原因是什麼？要在哪幾個地方調整？
 2. 同事在 ASP.NET Core 的 controller 裡呼叫外部 API 時寫了 `var r = httpClient.GetAsync(url).Result;`。平常沒事，但流量尖峰時所有請求延遲一起飆到好幾秒，CPU 卻不高。請用這堂的觀念解釋發生什麼事，並說明怎麼改。
 3. 一個服務在尖峰時，用戶端偶爾連線逾時，但服務本身的請求日誌看起來都很快。`ss -ltn` 顯示它的 listen socket Recv-Q 是 128、Send-Q 也是 128。這代表什麼？可能有哪些原因與修法？
+
+
+<details><summary>參考答案</summary>
+
+1. 最可能是**行程的 fd 上限**是預設的 1024（每條 WebSocket 連線佔一個 fd，加上 listen socket、log 檔等）。確認：`cat /proc/<pid>/limits | grep "open files"` 或在容器內 `ulimit -n`。調整：`docker run --ulimit nofile=1048576:1048576`（或 compose 的 `ulimits.nofile`）；若用 systemd 管 Docker daemon 或服務，設 `LimitNOFILE`；K8s 則看節點 container runtime 的預設值。系統層面也確認 `fs.file-max`／`fs.nr_open` 夠大。上量後再檢查 `net.core.somaxconn`、每連線記憶體，以及若有經過 NAT 的 conntrack 表大小。
+2. `.Result` 會**同步阻塞**一個執行緒池執行緒，直到外部 API 回來。尖峰時大量請求同時卡住執行緒，執行緒池耗盡（thread pool starvation），新請求和 await 之後的 continuation 都排隊等可用的執行緒；執行緒池只會慢慢地注入新執行緒（大約每秒一兩個），所以延遲一起飆高，而 CPU 因為大家都在等，看起來不高。修法：一路 async 到底：`var r = await httpClient.GetAsync(url);`，action 改成 `async Task<IActionResult>`；同時共用 `HttpClient`／`IHttpClientFactory`。可以用 `dotnet-counters` 看 `ThreadPool Queue Length`、`ThreadPool Thread Count` 確認。
+3. Recv-Q = Send-Q 表示 **accept queue 已滿**：核心已經完成握手的連線在排隊，程式來不及 accept；再來的連線就被丟（用戶端 SYN 或 ACK 被忽略、重試，看起來像逾時），而服務日誌只記錄到已經被 accept 的請求，所以「看起來都很快」。可用 `nstat -az | grep -i ListenOverflows` 或 `netstat -s | grep -i listen` 確認溢位計數。原因與修法：(a) backlog 太小：調大 `net.core.somaxconn` 與應用的 backlog；(b) accept 迴圈被阻塞或太慢（例如在 accept 迴圈裡做 TLS 握手或處理請求、事件迴圈被 CPU 工作卡住、執行緒池飢餓）：把處理移出 accept 路徑；(c) 單一行程撐不住：開多個 worker 搭配 `SO_REUSEPORT`，或水平擴展加 Pod，並在前面用負載平衡器。
+
+</details>
