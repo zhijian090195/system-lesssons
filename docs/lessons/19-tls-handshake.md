@@ -126,3 +126,11 @@ curl -v https://github.com 2>&1 | grep -E 'TLS|ALPN|SSL'
 1. 你用 Nginx 部署 `api.aicde.my`，Chrome 打開正常，但你的 Go 服務呼叫它時出現 `x509: certificate signed by unknown authority`。最可能的原因是什麼？怎麼用指令確認，怎麼修？另外再列一個「同樣錯誤、但原因在 Go 服務的 Docker 映像」的可能性。
 2. 某天伺服器的私鑰外洩了。有人在過去半年錄下了你網站的所有加密流量。在 TLS 1.3（ECDHE）和「TLS 1.2 + RSA 金鑰交換」兩種情況下，攻擊者能解開過去的流量嗎？為什麼？你除了換金鑰還要做什麼？
 3. 從吉隆坡呼叫一個美國的 API，RTT 約 200ms。你的 C# 服務每次呼叫都 `new HttpClient()` 並且呼叫完就 dispose。估算每次呼叫光是建連（TCP + TLS 1.3）就多花多少時間，並說明怎麼改。如果改成 TLS 1.2 呢？
+
+<details><summary>參考答案</summary>
+
+1. 最可能是 Nginx 只送了**葉憑證**、沒送中繼憑證（`ssl_certificate` 指到 `cert.pem` 而不是 `fullchain.pem`）。Chrome 會自己補中繼憑證（快取或 AIA 下載），Go 不會。確認：`openssl s_client -connect api.aicde.my:443 -servername api.aicde.my -showcerts </dev/null`，看 `Certificate chain` 是否只有 depth 0 一張、結尾是否 `Verify return code: 21 (unable to verify the first certificate)`。修法：改用 `fullchain.pem` 並 reload。映像端的可能：Go 服務用 `FROM scratch`／distroless／極簡 Alpine 沒裝 `ca-certificates`，根本沒有信任庫，要 `COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/` 或 `apk add ca-certificates`。（另一種：對方用的是公司內部 CA，要把該 CA 加進信任庫。）
+2. **TLS 1.3（ECDHE）**：解不開。每次連線的共享金鑰來自臨時的 ECDHE 私鑰，用完即丟，伺服器長期私鑰只用來**簽章**證明身分，不參與導出金鑰，這就是前向保密。攻擊者拿私鑰只能在**未來**冒充你的伺服器（主動中間人）。**TLS 1.2 + RSA 金鑰交換**：解得開。pre-master secret 是用伺服器公鑰加密後傳送的，有私鑰就能解出每一條錄下連線的金鑰。除了換私鑰，還要：撤銷舊憑證並重新簽發、輪替 session ticket 金鑰（ticket 金鑰外洩也會破壞恢復連線的保密性）、停用 RSA 金鑰交換與 TLS 1.0/1.1、檢查外洩途徑並評估哪些資料（密碼、token）需要強制重設。
+3. TLS 1.3：TCP 1 RTT + TLS 1 RTT = 2 RTT ≈ **400ms**，每次呼叫都多花，再加上 DNS 查詢與握手 CPU；而且 `new`/dispose `HttpClient` 還會留下大量 TIME_WAIT socket，可能耗盡 port（第 15 堂）。改法：共用一個長壽的 `HttpClient`（或 `IHttpClientFactory`），設定 `SocketsHttpHandler.PooledConnectionLifetime` 兼顧 DNS 更新（上一堂第 2 題），讓連線 keep-alive 重用，多數呼叫就只剩 1 RTT 的請求往返；能用 HTTP/2 就多工共用一條連線。TLS 1.2 是 TCP 1 + TLS 2 = 3 RTT ≈ **600ms**（有 session resumption 時可減為 2 RTT）。
+
+</details>
