@@ -168,3 +168,11 @@ FROM heap_page_items(get_raw_page('t', 0)) LIMIT 5;  -- 直接看 slot 陣列
 1. PostgreSQL 一張 `orders` 表，你每晚跑一次 `UPDATE orders SET status = 'archived' WHERE created_at < now() - interval '1 year'`，更新約 500 萬列。幾週後發現表的磁碟大小翻倍，但列數沒變多。為什麼？你可以怎麼處理和預防？
 2. 一個 slotted page 已經有好幾個被刪除的 tuple 留下的洞，加起來有 2 KB 空閒，但沒有任何一個單獨的洞大於 500 bytes。現在要插入一筆 1 KB 的 tuple，資料庫可以怎麼做？為什麼這個操作不會讓指向這頁其他資料的索引失效？
 3. 你要在 MySQL InnoDB 建一張事件記錄表，每秒寫入幾千筆。同事提議主鍵用 C# 的 `Guid.NewGuid()`（隨機 UUIDv4），另一個同事提議用自增 `BIGINT`。從「頁」的角度分析兩者差異；如果一定要用 UUID，有什麼折衷？
+
+<details><summary>參考答案</summary>
+
+1. PostgreSQL 的 UPDATE 不是原地改，而是標記舊版本死亡（設 `xmax`）並插入新版本，所以 500 萬列更新後表裡多了 500 萬個 dead tuple。若 autovacuum 跟不上（或有長交易、遺忘的 replication slot 擋住它），空間無法回收，新版本只能往檔案尾端加新頁，表就膨脹（bloat）。而且一般 VACUUM 只把空間標成可重用，不會把檔案縮小還給 OS。處理：`VACUUM (VERBOSE) orders` 讓空間可重用；要真的縮小檔案用 `VACUUM FULL`（會鎖表重寫）或線上工具 `pg_repack`。預防：分批更新並在批次間讓 VACUUM 有機會跑；調整這張表的 autovacuum 參數（調低 `autovacuum_vacuum_scale_factor`、提高 cost limit）；避免長交易；若 status 沒有索引，調低 `fillfactor` 讓 HOT update 在同頁完成；更好的設計是按時間分區（partition），封存時直接 detach/drop 舊分區，而不是逐列 UPDATE。
+2. 做**頁內整理（compaction / defragmentation）**：把頁內所有仍存活的 tuple 搬到一起（往頁尾擠緊），把零碎的洞合併成一整塊連續空閒空間，然後放入 1 KB 的新 tuple。索引不會失效，因為索引存的是 TID =（頁號, slot 號），不是頁內位移；搬動 tuple 時只更新每個 slot 裡的位移，slot 號不變，外界看到的位址也就不變。這正是 slotted page 多一層間接的目的。（PostgreSQL 的頁內整理叫 page pruning / defragmentation，常在存取頁時順便做。）
+3. InnoDB 的表本身就是按主鍵排序的 B+Tree（clustered index）。**自增 BIGINT**：新資料永遠落在最右邊的葉頁，頁一路填滿再開新頁，寫入集中在少數熱頁，buffer pool 命中率高、頁幾乎是滿的；主鍵 8 bytes，每個次要索引都要存主鍵，也比較省。**隨機 UUIDv4**：每筆插入落在 B+Tree 的隨機位置，要把隨機的舊頁讀進記憶體，頁滿了就**頁分裂**（一頁拆兩頁，各剩約一半），造成大量隨機 I/O、頁只半滿（空間浪費）、buffer pool 被打爆；16 bytes（存成字串更是 36 bytes）也讓所有次要索引變大。折衷：用**時間有序的 UUID**，例如 UUIDv7 或 ULID（前段是時間戳，所以大致遞增），並用 `BINARY(16)` 存；或內部用自增 BIGINT 當主鍵、另加一個有唯一索引的 UUID 欄位當對外 ID。（C# 的 `Guid.NewGuid()` 是 v4；.NET 9 起有 `Guid.CreateVersion7()`。）
+
+</details>
