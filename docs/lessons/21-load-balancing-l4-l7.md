@@ -157,3 +157,11 @@ sudo ipvsadm -Ln   # 若 kube-proxy 用 IPVS 模式
 1. 你把 Go 寫的 gRPC 服務從 2 個 Pod 擴到 6 個，前面是一般的 K8s ClusterIP Service。監控顯示新增的 4 個 Pod 幾乎沒有流量，原本 2 個還是很忙。為什麼？請提出至少兩種解法。
 2. 你的 ASP.NET Core 網站放到 AWS ALB 後面（HTTPS 在 ALB 終結，ALB 用 HTTP 打後端）。上線後發現 Google 登入跳轉回來時網址變成 `http://...` 導致失敗，而且日誌裡所有使用者的 IP 都一樣。原因是什麼？怎麼修？修的時候要注意什麼安全問題？
 3. 你要替一個 MQTT（基於 TCP 的 IoT 協定）服務和一個有 `/api`、`/admin` 兩組路由的 HTTP 服務各選一種 LB。各選 L4 還是 L7？為什麼？如果 MQTT 服務需要知道每個裝置的真實來源 IP，你要注意什麼？
+
+<details><summary>參考答案</summary>
+
+1. gRPC 跑在 HTTP/2 上，用戶端會建立**一條長連線**並在上面多工所有請求。ClusterIP Service 是 kube-proxy 的 **L4** 平衡，只在建立連線時挑一次 Pod，之後所有請求都黏在那條連線的 Pod 上；既有用戶端的連線不會因為新 Pod 出現而重建，所以新 Pod 沒流量。解法：(a) 用 L7 代理或 service mesh（Envoy、Linkerd、Istio）以「請求」為單位平衡；(b) 改用 headless Service（`clusterIP: None`）讓 DNS 回傳所有 Pod IP，搭配 grpc-go 的 `round_robin` 用戶端負載平衡；(c) 在伺服器端設 `keepalive.ServerParameters{MaxConnectionAge: ...}`，讓連線定期優雅關閉、用戶端重建時重新分配。
+2. TLS 在 ALB 終結，ALB 用 HTTP 連到後端，所以 ASP.NET Core 看到的 `Request.Scheme` 是 `http`，產生的 OAuth redirect_uri 也是 http；而 TCP 連線是 ALB 開的，`RemoteIpAddress` 是 ALB 的內網 IP。真實資訊在 ALB 附加的 `X-Forwarded-Proto`、`X-Forwarded-For`。修法：設定 `ForwardedHeadersOptions`（`ForwardedHeaders.XForwardedFor | XForwardedProto`）並在管線最前面 `app.UseForwardedHeaders()`。安全注意：只信任來自 LB 的標頭，把 ALB 所在的子網加進 `KnownNetworks`／`KnownProxies`（或用安全群組確保後端只能從 ALB 連），否則任何人都能偽造 `X-Forwarded-For` 繞過 IP 限制或速率限制；`X-Forwarded-For` 可能有多個值，要取最右邊那個由可信代理加上的。
+3. MQTT 選 **L4**（例如 NLB）：它不是 HTTP，L7 HTTP 代理看不懂；連線長壽，用 Least Connections 較好，閒置逾時要調長以配合 MQTT keep-alive。HTTP 服務選 **L7**（ALB、Nginx、Ingress）：要依 `/api`、`/admin` 路徑分流，還可以在 `/admin` 加 IP 白名單或驗證。真實來源 IP：若 L4 是透傳模式（NAT/DSR，例如 NLB 的 client IP preservation）後端直接看到原始 IP，但後端回程路由要經過 LB；若是代理模式（HAProxy `mode tcp`、某些 NLB 目標類型），要開 **PROXY protocol**，並讓 MQTT broker 支援解析它（例如 EMQX、Mosquitto 的設定），且只接受來自 LB 的 PROXY header。
+
+</details>
