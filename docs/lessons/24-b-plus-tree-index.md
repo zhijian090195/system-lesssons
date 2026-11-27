@@ -208,3 +208,11 @@ SELECT pg_size_pretty(pg_relation_size('users')),
 1. 你的 SaaS 有一張 `invoices` 表，常見的查詢是「某個租戶最近 20 張發票」：`WHERE tenant_id = @t ORDER BY issued_at DESC LIMIT 20`。現在只有 `(issued_at)` 和 `(tenant_id)` 兩個單欄索引。這個查詢為什麼可能還是慢？你會建什麼索引？欄位順序為什麼這樣排？如果查詢只需要 `id, issued_at, total`，還能怎麼優化？
 2. PostgreSQL 的 `orders` 表有 5000 萬列，`status` 欄位上有 B+Tree 索引，其中 95% 的列是 `'completed'`。你發現 `WHERE status = 'pending'` 走了索引而且很快，但 `WHERE status = 'completed'` 卻是 Seq Scan。這是優化器的 bug 嗎？為什麼？如果你只需要查 pending，還有什麼更省空間的索引？
 3. 一個後台列表 API 用 `ORDER BY id DESC OFFSET @skip LIMIT 50` 分頁，使用者翻到第 2000 頁時要好幾秒。從 B+Tree 的結構解釋為什麼，並改寫成 keyset（cursor）分頁的 SQL。這種寫法在 C# / Go 的 API 上要怎麼傳 cursor？
+
+<details><summary>參考答案</summary>
+
+1. 兩個單欄索引都不理想：用 `(issued_at)` 要從最新往回掃，邊掃邊過濾掉其他租戶，小租戶可能要掃很多頁才湊到 20 筆；用 `(tenant_id)` 要把該租戶所有發票撈出來再排序。建複合索引 `CREATE INDEX ON invoices (tenant_id, issued_at DESC);`：等值條件 `tenant_id` 放最左，排序欄位放後面，B+Tree 直接定位到該租戶的區段，按順序讀 20 筆就停，不用排序（B+Tree 可以反向掃，`DESC` 可省略，但寫出來意圖清楚）。若只需要 `id, issued_at, total`：PostgreSQL 加 `INCLUDE (id, total)` 成為覆蓋索引，走 Index Only Scan，不用回 heap；InnoDB 的次要索引葉子本來就帶主鍵 `id`，只要把 `total` 加進索引即可覆蓋。建了複合索引後，原本的 `(tenant_id)` 單欄索引是它的最左前綴，可以考慮刪掉，減少寫入放大。
+2. 不是 bug，是正確的成本估算。pending 很少（選擇性高），走索引只要讀少數葉頁和少數 heap 頁；completed 佔 95%，走索引等於對約 4750 萬筆做隨機 heap 讀取，比循序掃整張表（可以預讀、大塊 I/O）貴得多，所以優化器選 Seq Scan。更省空間的作法是**部分索引（partial index）**：`CREATE INDEX ON orders (created_at) WHERE status = 'pending';`，只把 pending 那 5% 放進樹，索引小很多，寫入 completed 的列也不用維護它，查 `WHERE status = 'pending'` 的查詢可以直接使用。低選擇性欄位單獨建索引通常沒什麼價值。
+3. B+Tree 只知道 key 的順序，不知道「第 N 筆」在哪（葉子沒有存排名）。`OFFSET 100000` 得從最大的 id 開始沿著葉子讀過 100000 筆，全部讀完再丟掉，只回傳後 50 筆，越後面越慢（PostgreSQL 往往還要回 heap 檢查可見性）。Keyset 分頁：`SELECT * FROM t WHERE id < @lastId ORDER BY id DESC LIMIT 50;`，直接在樹上定位到 `@lastId`，往左讀 50 筆，成本跟第幾頁無關。若排序欄位不唯一（例如 `created_at`），用複合條件 `WHERE (created_at, id) < (@lastCreatedAt, @lastId) ORDER BY created_at DESC, id DESC`，並建 `(created_at, id)` 索引。API 上：回應帶 `nextCursor`（把最後一筆的排序 key 編成不透明字串，例如 base64 的 JSON `{"createdAt":...,"id":...}`），下一次請求帶 `?cursor=...` 回來；C# 可用 `JsonSerializer` 加 `Convert.ToBase64String`，Go 用 `encoding/json` 加 `base64.URLEncoding`。代價是不能直接跳到「第 2000 頁」，只能上一頁、下一頁，這也是 GitHub、Stripe、Slack 等 API 用 cursor 分頁的原因。
+
+</details>
