@@ -268,3 +268,12 @@ docker logs pg | tail -10
    磁碟上：P1.pageLSN=20，P2.pageLSN=0（從未寫回），P3.pageLSN=90
    ```
 3. 你用 Go 寫一個小型 KV 服務：每次 `PUT` 就把記錄 `f.Write` 到 append-only 檔，然後回 HTTP 200。跑在 Docker 裡，資料目錄掛在雲端磁碟上。這樣在斷電或容器被 SIGKILL 時安全嗎？要怎麼改才符合 WAL 的保證？改完後吞吐量掉很多，有什麼方法拿回來？
+
+
+<details><summary>參考答案</summary>
+
+1. `synchronous_commit = off`：commit 時只把 WAL 放進記憶體就回覆成功，由背景的 WAL writer 稍後（約 `wal_writer_delay` 的三倍以內，預設約 600 ms）再 fsync。當機時**可能遺失最後一小段已回覆成功的交易**，但 WAL 的順序和完整性不受影響，資料庫恢復後是一致的，只是少了最後幾筆。`fsync = off`：PostgreSQL 完全不呼叫 fsync，WAL 和資料頁何時落盤、以什麼順序落盤都交給作業系統，鐵律 1 和 2 都失效，斷電後可能出現**資料檔損壞、索引和表不一致，甚至整個叢集無法啟動**，只能從備份還原。所以前者對日誌、點擊事件這種「掉幾百毫秒可以接受」的資料是合理的取捨，後者在正式環境絕對不行（只適合可隨時重建的測試資料庫）。`synchronous_commit` 可以**依交易或依連線設定**：全域保持 `on`，在寫日誌的連線或交易裡 `SET LOCAL synchronous_commit = off`，付款交易照常完整 fsync。另外也可以調大批次（一次 INSERT 多列）或靠 group commit（`commit_delay`）減少 fsync 次數。
+2. **Analysis**：從 checkpoint（LSN 50）開始，ATT = {T1, T2}，DPT = {P1:20, P2:40}。60 T1 COMMIT → T1 是 winner；70 T2 更新 P1（P1 已在 DPT，recLSN 維持 20），T2 的 lastLSN = 70；80、90 T3 開始並更新 P3，P3 加入 DPT（recLSN 90）；100 T3 COMMIT → winner。結果：**winner = T1、T3；loser = T2**（lastLSN 70）。**Redo**：從 DPT 最小的 recLSN = **20** 開始。LSN 20（P1）：P1.pageLSN = 20 ≥ 20，跳過。LSN 40（P2）：P2.pageLSN = 0 < 40，**重做** B = 80。LSN 70（P1）：P1.pageLSN = 20 < 70，**重做** C = 9（雖然 T2 是 loser，也要重演歷史）。LSN 90（P3）：P3.pageLSN = 90，跳過。**Undo** T2：先處理 LSN 70，C 9→5，寫 **CLR 110**（undoNextLSN = 40）；再處理 LSN 40，B 80→50，寫 **CLR 120**（undoNextLSN = 無，因為 40 的 prevLSN 指向 BEGIN）；最後寫 **T2 END 130**。最終 A = 200、B = 50、C = 5、D = 2。如果在寫完 CLR 110 後又當機，第二次恢復時 redo 會重做 CLR 110，undo 時看到 T2 最後一筆是 CLR 110，直接照 undoNextLSN 跳到 40，不會重複復原 C。
+3. 不安全。`f.Write` 只寫到 Linux 的 page cache（第 6 堂）。**容器被 SIGKILL** 時，行程雖然死了，但 page cache 屬於核心，資料最後通常還是會寫到磁碟，所以這種情況大多沒事；**主機斷電或 VM 當機**時，page cache 直接消失，你已經回 200 的資料就不見了，違反持久性。另外，寫到一半當機會留下殘缺的最後一筆。修正：(a) 回 200 之前呼叫 `f.Sync()`（或用 `O_DSYNC` 開檔），這是 WAL 鐵律 2；(b) 每筆記錄加長度和 CRC32，啟動時從頭讀，遇到壞尾巴就截斷；(c) 如果有建立新檔、rotate 或 rename 的操作，也要 fsync 所在的目錄，確保目錄項目落盤；(d) 確認雲端磁碟或 volume 驅動確實尊重 fsync。吞吐量拿回來的方法：**group commit**，用一個 goroutine 專門負責 fsync，許多請求的記錄先寫入，各自等待「flushedLSN ≥ 我的 LSN」的通知（例如用 channel 或 `sync.Cond`），一次 fsync 就能讓一批請求一起回 200；或讓客戶端批次 PUT；換低 fsync 延遲的磁碟（本機 NVMe、或提高雲端磁碟的 IOPS 等級）。如果某些資料允許遺失，也可以像 `synchronous_commit = off` 那樣，提供「非同步落盤」模式讓呼叫端選擇。
+
+</details>
