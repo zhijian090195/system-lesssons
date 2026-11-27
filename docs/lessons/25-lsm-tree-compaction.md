@@ -182,3 +182,11 @@ Filter.db 就是 Bloom filter，Index.db 就是 index block，對照第 2 節的
 1. 你用 Cassandra 存聊天訊息，每天有一支排程用 `DELETE` 清掉 30 天前的訊息。幾週後，「讀某個聊天室最新 50 則」的查詢越來越慢，日誌出現 tombstone 警告。從 LSM 的結構解釋為什麼「刪除」反而讓讀取變慢，並提出至少兩種改善方式。
 2. 某服務用 RocksDB 存使用者狀態。流量尖峰時，p99 寫入延遲從 1 ms 跳到 500 ms，但 CPU 不高。你會先懷疑什麼機制？要看哪些指標？可以怎麼調整？
 3. 你要幫一個 IoT 平台選儲存引擎：每秒 20 萬筆感測器寫入、很少更新、查詢幾乎都是「某裝置最近 1 小時的資料」。你會選 B+Tree 還是 LSM？Compaction 策略選 leveled 還是 size-tiered（或其他）？key 要怎麼設計才能讓「最近 1 小時」的查詢有效率？
+
+<details><summary>參考答案</summary>
+
+1. LSM 的刪除不是真的刪掉，而是寫一筆 tombstone。查「最新 50 則」時，引擎要合併各層 SSTable，沿途遇到的 tombstone 不能直接跳過（要用它遮住更舊的資料），所以如果一個分區裡累積了大量 tombstone，讀取得先掃過成千上萬個墓碑才湊到 50 筆活資料；而 tombstone 要等 `gc_grace_seconds`（預設 10 天）過後、且 compaction 把它和底下的舊資料合在一起時才會被清掉。改善：(a) 不用 DELETE，改用 **TTL**（`INSERT ... USING TTL 2592000`），讓資料自然過期；(b) 搭配 **TimeWindowCompactionStrategy（TWCS）**，按時間窗把資料分到不同 SSTable，整個時間窗過期後直接丟掉整個檔案，不用逐筆 tombstone；(c) 資料建模上按時間分桶，例如分區鍵用 `(room_id, yyyymm)`，查最新訊息只讀最近的分區；(d) 視情況調低 `gc_grace_seconds`（要確保 repair 能在這段時間內跑完，否則刪掉的資料可能「復活」）。
+2. 先懷疑 **compaction 跟不上導致 write stall**：尖峰時 MemTable flush 太快，L0 檔案數超過 `level0_slowdown_writes_trigger` / `level0_stop_writes_trigger`，或待 compaction 的資料量超過 `soft/hard_pending_compaction_bytes_limit`，RocksDB 就主動減速或暫停寫入，所以 CPU 不高但延遲暴增（在等磁碟 I/O）。指標：RocksDB stats 裡的 stall 時間（`rocksdb.stall.micros`、`DB Stats` 中的 Stall）、每層檔案數、`estimate-pending-compaction-bytes`、immutable MemTable 數量、磁碟 IOPS / 頻寬是否滿載。調整：增加 `max_background_jobs`（compaction/flush 執行緒）、加大 `write_buffer_size` 和 `max_write_buffer_number` 吸收尖峰、調整 L0 觸發門檻、開 subcompaction、換更快的磁碟或提高雲端磁碟的 IOPS，必要時改用寫入放大較低的 compaction 策略（universal / tiered）。
+3. 選 **LSM**：寫入量大、幾乎只追加、很少更新，正好是 LSM 的強項，而且時序資料壓縮率高、省儲存成本。Compaction 用 **時間窗策略（TWCS / FIFO）** 或 size-tiered：資料按時間寫入、按時間過期，同一時間窗的資料放在一起，舊窗整個刪掉，避免 leveled 那種反覆重寫舊資料的高寫入放大；如果讀取延遲很重要且資料量可控，leveled 也可以考慮。Key 設計：`device_id + 時間戳`（例如 `device42#2026-11-27T09:00:00`，時間用固定長度、可排序的格式，或用反轉時間戳讓最新的排前面），這樣「某裝置最近 1 小時」就是 LSM 上的一段連續範圍掃描；在 Cassandra 裡就是分區鍵 `(device_id, 日期桶)`、clustering key `ts DESC`。避免用純時間戳當 key 的開頭，否則所有寫入擠在同一個範圍（分散式系統裡會變成熱點分片，第 35 堂會講）。
+
+</details>
