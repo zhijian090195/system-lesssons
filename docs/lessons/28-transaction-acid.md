@@ -197,3 +197,11 @@ COMMIT;
 1. 你的 Go 服務在一筆 DB 交易裡做三件事：扣庫存、建立訂單、呼叫金流 API 扣款（約 2 秒），全部成功才 commit。請指出這個設計在 ACID 的哪幾個面向、以及效能上會出問題（至少三點），並提出改進方案。
 2. 同事說：「我們用的是 PostgreSQL，有 ACID，所以 EF Core 的『先讀庫存、判斷 > 0、再扣 1』不可能超賣。」這句話錯在哪裡？給出兩種不同的修法，並說明各自的取捨。
 3. 公司把資料庫從單機 PostgreSQL 搬到 AWS RDS Multi-AZ，發現每秒寫入交易數（TPS）下降、p99 commit 延遲變高。用這堂對 D 的分層解釋原因；如果某些寫入（例如點擊紀錄）可以接受遺失最近幾百毫秒的資料，你會怎麼調整，而不影響訂單資料？
+
+<details><summary>參考答案</summary>
+
+1. **問題**：(a) **I／鎖持有過長**：扣庫存的 UPDATE 拿了列鎖，要等金流 2 秒後才 commit，同商品的其他請求全部排隊，熱門商品吞吐量掉到每秒約 0.5 筆；長交易也阻擋 PG 的 VACUUM、拉長 InnoDB undo log。(b) **A 的假象**：金流扣款不在資料庫交易裡。若金流成功、之後 commit 失敗（連線斷、當機、序列化衝突），使用者被扣錢卻沒有訂單，DB rollback 撤不回外部扣款；反過來金流逾時但其實成功，也一樣不一致。(c) **連線池耗盡**：每筆請求佔一條連線 2 秒以上，流量一高 `database/sql` 連線池就滿了，其他與付款無關的 API 也被拖垮。(d) ctx 逾時後重試，若沒有冪等鍵可能重複扣款。**改進**：拆成兩段短交易＋狀態機：交易 1 扣（或預留）庫存並建立 `status=pending` 訂單，commit；交易外呼叫金流並帶**冪等鍵**（訂單 ID）；交易 2 依結果把訂單改成 paid 或 cancelled 並釋放預留庫存。搭配 outbox 發事件、背景任務對帳處理逾時的 pending 訂單（Saga 的補償）。
+2. **錯在**：ACID 的 I 有不同等級，PG 預設是 **Read Committed**，不是 Serializable。「先 SELECT 到應用程式、判斷、再 UPDATE 成計算後的值」是典型的 read-modify-write，兩個交易都讀到 1、都寫 0，就是 lost update；EF Core 的 SaveChanges 雖然包了交易也擋不住。**修法一：原子條件更新**：`UPDATE items SET stock = stock - 1 WHERE id=@id AND stock > 0`，檢查影響列數。最快、不用重試，但業務邏輯要能寫進一句 SQL。**修法二：樂觀並行控制**：加 `RowVersion`/`version` 欄位，EF Core 遇到 `DbUpdateConcurrencyException` 就重讀重試。邏輯可以留在 C#，衝突少時很快，但熱門商品衝突多時會大量重試。**其他**：`SELECT ... FOR UPDATE` 悲觀鎖（簡單可靠，但持鎖時間長、要注意加鎖順序避免死結），或把交易設為 Serializable 並處理 40001 重試（最通用，代價是中止率與重試邏輯）。
+3. **原因**：單機時 D 只到「fsync 到本機磁碟」；Multi-AZ 把 D 提升到「同步寫到另一個可用區」，每次 commit 都要等另一個可用區確認收到資料，多了一次跨可用區往返，加上 EBS 這類網路磁碟本身的延遲。commit 延遲變高，在連線數固定時每條連線每秒能完成的交易就變少，所以 TPS 下降。**調整**：不要全域降級。對點擊紀錄，在那些連線或交易裡 `SET LOCAL synchronous_commit = off`，commit 不等 WAL 刷盤，可能遺失最近幾百毫秒，但不會造成資料損壞；訂單交易維持預設。更好的做法是讓點擊紀錄不直接進主庫：批次寫入（一次 INSERT 多列，攤平 commit 成本）、先寫 Kafka／Kinesis 再批次匯入，或放到另一個不開 Multi-AZ 的資料庫。也可以靠更多併發讓 group commit 一次 fsync 多筆，把吞吐量拉回來。
+
+</details>
