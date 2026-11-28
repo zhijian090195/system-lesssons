@@ -193,3 +193,11 @@ UPDATE doctors SET on_call=false WHERE name='bob';
 1. 你在 MySQL（預設 RR）寫了一個 C# 服務：交易裡先 `SELECT stock FROM items WHERE id=1`（得到 5），另一個交易這時把 stock 改成 0 並 commit，接著你的交易執行 `UPDATE items SET stock = stock - 1 WHERE id=1`，再 `SELECT stock`。最後 SELECT 會看到多少？為什麼「RR 保證可重複讀」在這裡好像失效了？
 2. 會議室預約系統：交易先查「這間會議室 14:00–15:00 有沒有預約」，沒有就 INSERT 一筆。在 PostgreSQL 的 Read Committed 和 Repeatable Read 下，同時兩個請求會不會重複預約？這屬於哪一種異常？請給出**兩種**不靠全域 Serializable 的解法。
 3. 你的團隊決定把 Go 服務的 PG 交易全部改成 Serializable「一勞永逸」。上線後錯誤率上升、p99 變高。請說明可能原因（至少兩點），以及你會怎麼調整程式和設計。
+
+<details><summary>參考答案</summary>
+
+1. **看到 -1**（0 - 1）。InnoDB 的一般 SELECT 是**快照讀**，交易第一次讀時建立 read view，之後都讀同一個舊版本（5），所以前兩次讀看起來可重複。但 `UPDATE` 是**當前讀**：它一定讀最新 commit 的值（0）並加鎖再扣，得到 -1。交易自己寫過的列，之後的快照讀會看到自己的版本，所以最後 SELECT 看到 -1。RR 保證的是「快照讀可重複」，不保證「當前讀和快照讀一致」。PG 的 RR（SI）在這種情況會直接回 40001 錯誤，讓你重試。防守方法：加 `CHECK (stock >= 0)` 約束、用 `WHERE stock > 0` 條件更新並檢查影響列數，或一開始就 `SELECT ... FOR UPDATE`。
+2. **會**重複預約，兩個等級都會。這是**幻讀造成的寫入偏斜**：兩個交易查的是同一個「不存在的列」範圍，各自 INSERT 不同的新列，沒有任何列發生寫入衝突。RC 每句新快照擋不住；PG 的 RR 是 SI，同樣擋不住寫入偏斜。**解法**：(a) **排他約束**：`EXCLUDE USING gist (room WITH =, tstzrange(start_at, end_at) WITH &&)`，由資料庫保證時段不重疊，最可靠。(b) **實體化衝突**：預先建好「會議室 × 時段」的 slot 表，預約時 `SELECT ... FOR UPDATE` 或 `UPDATE slots SET booked_by=... WHERE booked_by IS NULL`，把幻讀變成同一列的寫入衝突。(c) 對該會議室那一列先 `SELECT ... FROM rooms WHERE id=? FOR UPDATE` 當作互斥鎖，也可以用 `pg_advisory_xact_lock(room_id)`。
+3. **原因**：(a) **沒寫重試**：SSI 會主動中止有危險依賴的交易（40001），沒重試就直接變成 500。(b) **交易太長或範圍太大**：SSI 要追蹤讀過的範圍（predicate lock），全表掃描、長交易會讓誤判衝突變多，中止率上升；重試又增加負載，p99 跟著上升。(c) 混入外部呼叫或很慢的步驟，衝突窗口變大。(d) 少了合適的索引，predicate lock 升級成粗粒度鎖，衝突更多。**調整**：寫一個 `withTx(ctx, fn)` 包裝器，遇到 40001/40P01 就以指數退避加抖動重試整個 fn，並限制重試次數，fn 內不做有副作用的外部呼叫；只讀交易宣告 `READ ONLY`（PG 對只讀 Serializable 有優化，也可以用 `DEFERRABLE`）；交易縮短、補索引；只有真正需要的業務流程（金流、庫存、排班）才用 Serializable，其他維持 RC 加原子 SQL 或樂觀鎖；監控中止率。
+
+</details>
